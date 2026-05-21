@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
 
-# Add parent directory to sys.path so we can import utils
+# Add parent directory to sys.path so we can import utils and config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.patch_utils import extract_overlapping_patches
@@ -20,6 +20,7 @@ from utils.embedding_utils import get_patch_embeddings
 from utils.anomaly_utils import compute_anomaly_scores
 from utils.visualization_utils import generate_heatmap, create_overlay
 from utils.postprocess_utils import create_binary_mask, clean_mask, detect_defects
+import config as cfg
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -108,96 +109,108 @@ async def analyze_images(
         # Generate anomaly visual outputs
         heatmap = generate_heatmap(anomaly_scores, positions, test_np.shape, patch_size=64)
 
-        # 1. Similarity tolerance logic before final anomaly decision
-        # Check if identical or near-identical images
-        is_nominal = (mean_sim >= 0.985 and min_sim >= 0.95) or (np.max(heatmap) == 0)
+        # Additional smoothing pass to suppress isolated single-patch spikes (FP reduction)
+        if np.max(heatmap) > 0:
+            heatmap_smooth = cv2.GaussianBlur(heatmap, (11, 11), 0)
+        else:
+            heatmap_smooth = heatmap
+
+        # 1. Similarity tolerance — immediately classify as nominal if near-identical
+        is_nominal = (
+            (mean_sim >= cfg.NOMINAL_MEAN_SIM_THRESHOLD and min_sim >= cfg.NOMINAL_MIN_SIM_THRESHOLD)
+            or (np.max(heatmap_smooth) == 0)
+        )
 
         if is_nominal:
-            binary_mask = np.zeros_like(heatmap)
-            cleaned_mask = np.zeros_like(heatmap)
+            cleaned_mask = np.zeros(heatmap.shape, dtype=np.uint8)
             heatmap = np.zeros_like(heatmap)
             detected_regions = []
         else:
-            # Generate binary mask
-            binary_mask = create_binary_mask(heatmap, threshold=180)
-            cleaned_mask = clean_mask(binary_mask)
+            # 2. Suppress weak heatmap activations (noise floor gate)
+            if np.max(heatmap_smooth) < cfg.HEATMAP_MIN_PEAK:
+                cleaned_mask = np.zeros(heatmap.shape, dtype=np.uint8)
+                heatmap = np.zeros_like(heatmap)
+                detected_regions = []
+            else:
+                binary_mask  = create_binary_mask(heatmap_smooth, threshold=180)
+                cleaned_mask = clean_mask(binary_mask)
 
-            # 2. Suppress weak heatmap activations
-            if np.max(heatmap) < 15:
-                cleaned_mask[:] = 0
-                binary_mask[:] = 0
+                # 3. Contour filtering — require minimum credible area
+                contours, _ = cv2.findContours(
+                    cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                detected_regions = []
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if area < cfg.CONTOUR_MIN_AREA_PX:
+                        continue
+                    x, y, w, h = cv2.boundingRect(contour)
+                    detected_regions.append({
+                        "id": len(detected_regions),
+                        "x":  float(x) / 512.0 * 100,
+                        "y":  float(y) / 512.0 * 100,
+                        "width":   float(w) / 512.0 * 100,
+                        "height":  float(h) / 512.0 * 100,
+                        "area_px": int(area)
+                    })
 
-            # 3. Improve contour filtering (area >= 600px only)
-            contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            detected_regions = []
-            for i, contour in enumerate(contours):
-                area = cv2.contourArea(contour)
-                if area < 600:
-                    continue
-                x, y, w, h = cv2.boundingRect(contour)
-                detected_regions.append({
-                    "id": len(detected_regions),
-                    "x": float(x) / 512.0 * 100,
-                    "y": float(y) / 512.0 * 100,
-                    "width": float(w) / 512.0 * 100,
-                    "height": float(h) / 512.0 * 100,
-                    "area_px": int(area)
-                })
-
-        # Defect visualization overlays (using possibly zeroed out heatmap/mask)
+        # Defect visualization overlays
         defect_detection = detect_defects(test_np, cleaned_mask)
-        overlay = create_overlay(test_np, heatmap)
+        overlay          = create_overlay(test_np, heatmap)
 
-        # 4. Fix anomaly score logic
-        # Remove aggressive contour-based score inflation
-        if len(detected_regions) > 0:
-            anomaly_score = float((1.0 - mean_sim) * 0.3 + (1.0 - min_sim) * 0.7)
-            anomaly_score = max(0.0, min(1.0, anomaly_score))
-        else:
-            anomaly_score = float(max(0.0, (1.0 - mean_sim) * 0.1))
-
+        # 4. Compute anomaly score
         anomaly_pixel_ratio = float(np.sum(cleaned_mask > 0) / cleaned_mask.size)
 
-        # 5. Add proper anomaly decision logic
-        has_anomalies = (mean_sim < 0.985 or min_sim < 0.95) and (len(detected_regions) > 0)
+        if len(detected_regions) > 0 and anomaly_pixel_ratio >= cfg.MIN_ANOMALY_PIXEL_RATIO:
+            # Credible regions exist — weight minimum similarity heavily
+            anomaly_score = float((1.0 - mean_sim) * 0.25 + (1.0 - min_sim) * 0.75)
+            anomaly_score = max(0.0, min(1.0, anomaly_score))
+        else:
+            # No credible regions — conservative low score
+            anomaly_score = float(max(0.0, (1.0 - mean_sim) * 0.15))
+
+        # 5. Final binary classification gate using calibrated threshold from config
+        has_anomalies = anomaly_score >= cfg.ANOMALY_THRESHOLD
 
         if not has_anomalies:
-            # Ensure everything is clean and empty
-            detected_regions = []
-            anomaly_score = float(max(0.0, (1.0 - mean_sim) * 0.1))
-            heatmap = np.zeros_like(heatmap)
-            overlay = test_np.copy()
-            defect_detection = test_np.copy()
+            # Clean up all visualisations for nominal result
+            detected_regions   = []
+            anomaly_score      = float(max(0.0, (1.0 - mean_sim) * 0.15))
+            heatmap            = np.zeros_like(heatmap)
+            overlay            = test_np.copy()
+            defect_detection   = test_np.copy()
             anomaly_pixel_ratio = 0.0
 
-        # Calibrate severity status
-        if anomaly_score < 0.12:
-            status = "STRUCTURE VERIFIED"
+        # 6. Map anomaly_score → severity label via config bands
+        status = cfg.get_severity(anomaly_score)
+
+        # Generate natural-language interpretation
+        if anomaly_score < cfg.ANOMALY_THRESHOLD:
             explanation = (
                 f"No significant visual anomalies were detected. All patches conform to the reference image "
-                f"within acceptable statistical thresholds. The average patch similarity index is {mean_sim:.3f} "
-                f"(minimum local similarity: {min_sim:.3f}), indicating a highly similar surface configuration."
+                f"within acceptable statistical thresholds (calibrated threshold: {cfg.ANOMALY_THRESHOLD:.3f}). "
+                f"Average patch similarity: {mean_sim:.4f}, minimum patch similarity: {min_sim:.4f}."
             )
-        elif anomaly_score < 0.28:
-            status = "MINOR VISUAL VARIATION"
+        elif anomaly_score < 0.25:
             explanation = (
-                f"Minor visual variations were observed (average similarity: {mean_sim:.3f}, min local similarity: {min_sim:.3f}). "
-                f"These deviations are likely caused by negligible surface reflections, slight orientation changes, or ambient light fluctuations, "
-                f"passing standard structural validation constraints."
+                f"Minor visual variations were observed (anomaly score: {anomaly_score:.4f}). "
+                f"Average patch similarity: {mean_sim:.4f}, minimum local similarity: {min_sim:.4f}. "
+                f"These deviations may represent minor surface reflections, slight orientation differences, "
+                f"or ambient illumination fluctuations near the detection threshold ({cfg.ANOMALY_THRESHOLD:.3f})."
             )
-        elif anomaly_score < 0.50:
-            status = "MODERATE ANOMALY"
+        elif anomaly_score < 0.45:
             explanation = (
-                f"Moderate anomalies detected. Local deviations were identified in {len(detected_regions)} region(s) "
-                f"with a localized cosine similarity drop to {min_sim:.3f}. The system suggests visible surface "
-                f"irregularities, small scratches, or contamination patterns."
+                f"Structural deviations detected in {len(detected_regions)} localised region(s). "
+                f"Anomaly score: {anomaly_score:.4f} (threshold: {cfg.ANOMALY_THRESHOLD:.3f}). "
+                f"Cosine similarity dropped to {min_sim:.4f} in the most anomalous patch. "
+                f"This indicates visible surface irregularities, scratches, or contamination patterns."
             )
         else:
-            status = "SEVERE ANOMALY"
             explanation = (
-                f"Severe anomalies detected. Distinct visual mismatches compared to the reference target were identified in "
-                f"{len(detected_regions)} region(s), with localized similarity dropping to {min_sim:.3f} and an anomaly score of {anomaly_score:.3f}. "
-                f"This indicates major structural cracks, surface ruptures, or significant contamination."
+                f"High anomaly detected across {len(detected_regions)} localised region(s). "
+                f"Anomaly score: {anomaly_score:.4f} — significantly above threshold ({cfg.ANOMALY_THRESHOLD:.3f}). "
+                f"Minimum patch similarity: {min_sim:.4f}. "
+                f"This indicates major structural defects, surface ruptures, or heavy contamination."
             )
 
         # Convert images to base64 Data URLs
@@ -210,6 +223,7 @@ async def analyze_images(
         return {
             "status": status,
             "anomaly_score": anomaly_score,
+            "threshold_used": cfg.ANOMALY_THRESHOLD,
             "detected_regions": detected_regions,
             "explanation": explanation,
             "reference_image": ref_b64,
@@ -250,8 +264,15 @@ async def get_evaluation():
                 "true_positives": 0,
                 "true_negatives": 0
             },
+            "threshold_info": {
+                "selected_threshold": cfg.ANOMALY_THRESHOLD,
+                "selection_method": "default",
+            },
+            "sweep_data": [],
+            "score_distribution": {},
             "samples": []
         }
+
 
 # Serve static assets
 frontend_dist_path = os.path.abspath(

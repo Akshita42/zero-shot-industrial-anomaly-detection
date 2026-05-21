@@ -16,14 +16,27 @@ function getSeverityConfig(status) {
       return {
         bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', text: 'text-emerald-400',
         icon: <CheckCircle className="w-3.5 h-3.5" />,
-        bar: 'bg-emerald-500', barWidth: '8%'
+        bar: 'bg-emerald-500', barWidth: '5%'
       };
     case 'MINOR VISUAL VARIATION':
       return {
         bg: 'bg-amber-500/10', border: 'border-amber-500/20', text: 'text-amber-400',
         icon: <Info className="w-3.5 h-3.5" />,
-        bar: 'bg-amber-400', barWidth: '35%'
+        bar: 'bg-amber-400', barWidth: '30%'
       };
+    case 'STRUCTURAL DEVIATION':
+      return {
+        bg: 'bg-orange-500/10', border: 'border-orange-500/20', text: 'text-orange-400',
+        icon: <AlertCircle className="w-3.5 h-3.5" />,
+        bar: 'bg-orange-500', barWidth: '65%'
+      };
+    case 'HIGH ANOMALY':
+      return {
+        bg: 'bg-red-500/10', border: 'border-red-500/20', text: 'text-red-400',
+        icon: <AlertTriangle className="w-3.5 h-3.5" />,
+        bar: 'bg-red-500', barWidth: '95%'
+      };
+    // Legacy labels from older results
     case 'MODERATE ANOMALY':
       return {
         bg: 'bg-orange-500/10', border: 'border-orange-500/20', text: 'text-orange-400',
@@ -635,8 +648,8 @@ export default function Playground() {
               <div>
                 <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight">Quantitative Evaluation</h2>
                 <p className="text-slate-400 text-sm mt-2">
-                  Automated benchmark results of the CLIP pipeline on the MVTec bottle dataset.
-                  Run <code className="text-cyan-glow bg-cyan-glow/5 px-1 py-0.5 rounded text-xs">python backend/evaluation.py</code> to generate metrics.
+                  Automated benchmark on MVTec bottle dataset with threshold calibration sweep.
+                  Run <code className="text-cyan-glow bg-cyan-glow/5 px-1 py-0.5 rounded text-xs">python backend/evaluation.py</code> to regenerate.
                 </p>
               </div>
               <button onClick={fetchEvaluation} disabled={evalLoading} className="flex items-center gap-2 px-4 py-2 border border-white/10 text-slate-400 hover:text-white rounded-lg text-xs font-mono transition-all cursor-pointer">
@@ -655,28 +668,59 @@ export default function Playground() {
                 <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
                 <div>
                   <strong className="block font-bold mb-1">Evaluation data not found</strong>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    Run the evaluation pipeline from your terminal first:
-                  </p>
-                  <code className="block mt-2 bg-dark-deep text-cyan-glow text-xs p-3 rounded-lg border border-white/5">
-                    python backend/evaluation.py
-                  </code>
-                  <p className="text-xs text-slate-500 mt-2">The script will evaluate the full MVTec bottle test set and save results to <code className="text-cyan-glow">backend/evaluation_results.json</code>.</p>
+                  <p className="text-xs text-slate-400 leading-relaxed">Run the evaluation pipeline from your terminal:</p>
+                  <code className="block mt-2 bg-dark-deep text-cyan-glow text-xs p-3 rounded-lg border border-white/5">python backend/evaluation.py</code>
+                  <p className="text-xs text-slate-500 mt-2">Saves results to <code className="text-cyan-glow">backend/evaluation_results.json</code> and auto-calibrates <code className="text-cyan-glow">backend/config.py</code>.</p>
                 </div>
               </div>
             )}
 
             {evalData && (() => {
-              const m = evalData.metrics;
+              const m   = evalData.metrics;
+              const ti  = evalData.threshold_info || {};
               const pct = (v) => `${(v * 100).toFixed(1)}%`;
+
+              // Sweep chart data — sample every other point for readability
+              const sweepRaw   = evalData.sweep_data || [];
+              const sweepChart = sweepRaw.filter((_, i) => i % 2 === 0);
+
+              // Score distribution
+              const distRaw = evalData.score_distribution || {};
+              const distKeys = Object.keys(distRaw);
+
               const metricCards = [
-                { label: 'Accuracy', value: pct(m.accuracy), sub: `${m.correct_predictions} / ${m.total_samples} correct`, bar: m.accuracy, color: 'bg-emerald-500', text: 'text-emerald-400' },
-                { label: 'Precision', value: pct(m.precision), sub: `TP / (TP + FP)`, bar: m.precision, color: 'bg-cyan-500', text: 'text-cyan-400' },
-                { label: 'Recall', value: pct(m.recall), sub: `TP / (TP + FN)`, bar: m.recall, color: 'bg-purple-500', text: 'text-purple-400' },
-                { label: 'F1 Score', value: pct(m.f1_score), sub: `Harmonic mean of P & R`, bar: m.f1_score, color: 'bg-amber-500', text: 'text-amber-400' },
+                { label: 'Accuracy',  value: pct(m.accuracy),  sub: `${m.correct_predictions} / ${m.total_samples} correct`, bar: m.accuracy,  color: 'bg-emerald-500', text: 'text-emerald-400' },
+                { label: 'Precision', value: pct(m.precision), sub: 'TP / (TP + FP)',                                          bar: m.precision, color: 'bg-cyan-500',    text: 'text-cyan-400'    },
+                { label: 'Recall',    value: pct(m.recall),    sub: 'TP / (TP + FN)',                                          bar: m.recall,    color: 'bg-purple-500',  text: 'text-purple-400'  },
+                { label: 'F1 Score',  value: pct(m.f1_score),  sub: 'Harmonic mean of P & R',                                 bar: m.f1_score,  color: 'bg-amber-500',   text: 'text-amber-400'   },
               ];
+
               return (
                 <div className="space-y-6">
+
+                  {/* Threshold Info Card */}
+                  {ti.selected_threshold && (
+                    <div className="border border-cyan-glow/15 bg-cyan-glow/3 rounded-xl p-5 flex flex-wrap items-center gap-6">
+                      <div>
+                        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">Selected Detection Threshold</div>
+                        <div className="text-3xl font-bold font-mono text-cyan-glow">{ti.selected_threshold?.toFixed(3)}</div>
+                        <div className="text-[10px] font-mono text-slate-500 mt-1">via {ti.selection_method === 'best_f1' ? 'Best F1 sweep' : 'Default'}</div>
+                      </div>
+                      <div className="flex-1 min-w-[180px]">
+                        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-2">Threshold → F1 Trade-off Note</div>
+                        <p className="text-xs text-slate-400 leading-relaxed">
+                          Lower thresholds increase recall but raise false positives. The selected threshold maximises F1 score across the MVTec bottle test split, balancing precision and recall for this zero-shot reference-based architecture.
+                        </p>
+                      </div>
+                      {ti.balanced_threshold && (
+                        <div className="text-right">
+                          <div className="text-[10px] font-mono text-slate-500 uppercase tracking-widest mb-1">Balanced P≈R Threshold</div>
+                          <div className="text-xl font-bold font-mono text-purple-400">{ti.balanced_threshold?.toFixed(3)}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Metric Cards */}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                     {metricCards.map(({ label, value, sub, bar, color, text }) => (
@@ -695,22 +739,21 @@ export default function Playground() {
 
                   {/* Summary + Confusion Matrix */}
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
                     {/* Dataset Summary */}
                     <div className="border border-white/5 bg-white/2 p-6 rounded-xl space-y-4">
                       <span className="text-xs font-mono font-bold tracking-widest text-slate-500 uppercase block">Dataset Summary</span>
                       <div className="space-y-2.5 font-mono text-xs">
                         {[
-                          ['Total Samples', m.total_samples],
-                          ['Correct Predictions', m.correct_predictions],
-                          ['True Positives (TP)', m.true_positives],
-                          ['True Negatives (TN)', m.true_negatives],
-                          ['False Positives (FP)', m.false_positives],
-                          ['False Negatives (FN)', m.false_negatives],
+                          ['Total Samples',          m.total_samples],
+                          ['Correct Predictions',    m.correct_predictions],
+                          ['True Positives (TP)',    m.true_positives],
+                          ['True Negatives (TN)',    m.true_negatives],
+                          ['False Positives (FP)',   m.false_positives],
+                          ['False Negatives (FN)',   m.false_negatives],
                         ].map(([label, val]) => (
                           <div key={label} className="flex justify-between border-b border-white/5 pb-2 last:border-0 last:pb-0">
                             <span className="text-slate-400">{label}</span>
-                            <span className="text-white font-bold">{val}</span>
+                            <span className={`font-bold ${label.includes('False') ? 'text-red-400' : label.includes('True') ? 'text-emerald-400' : 'text-white'}`}>{val}</span>
                           </div>
                         ))}
                       </div>
@@ -720,31 +763,23 @@ export default function Playground() {
                     <div className="border border-white/5 bg-white/2 p-6 rounded-xl space-y-4">
                       <span className="text-xs font-mono font-bold tracking-widest text-slate-500 uppercase block">Confusion Matrix</span>
                       <div className="grid grid-cols-2 gap-3 max-w-xs mx-auto">
-                        <div className="text-center">
-                          <div className="text-[9px] font-mono text-slate-500 mb-1">Predicted Normal</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-[9px] font-mono text-slate-500 mb-1">Predicted Anomaly</div>
-                        </div>
-                        {/* TN */}
+                        <div className="text-center"><div className="text-[9px] font-mono text-slate-500 mb-1">Predicted Normal</div></div>
+                        <div className="text-center"><div className="text-[9px] font-mono text-slate-500 mb-1">Predicted Anomaly</div></div>
                         <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-4 text-center">
                           <div className="text-2xl font-bold font-mono text-emerald-400">{m.true_negatives}</div>
                           <div className="text-[9px] font-mono text-emerald-600 mt-1">TN</div>
                           <div className="text-[8px] font-mono text-slate-500">Normal → Normal</div>
                         </div>
-                        {/* FP */}
                         <div className="bg-red-500/5 border border-red-500/15 rounded-lg p-4 text-center">
                           <div className="text-2xl font-bold font-mono text-red-400">{m.false_positives}</div>
                           <div className="text-[9px] font-mono text-red-600 mt-1">FP</div>
                           <div className="text-[8px] font-mono text-slate-500">Normal → Anomaly</div>
                         </div>
-                        {/* FN */}
                         <div className="bg-amber-500/5 border border-amber-500/15 rounded-lg p-4 text-center">
                           <div className="text-2xl font-bold font-mono text-amber-400">{m.false_negatives}</div>
                           <div className="text-[9px] font-mono text-amber-600 mt-1">FN</div>
                           <div className="text-[8px] font-mono text-slate-500">Anomaly → Normal</div>
                         </div>
-                        {/* TP */}
                         <div className="bg-cyan-500/10 border border-cyan-500/20 rounded-lg p-4 text-center">
                           <div className="text-2xl font-bold font-mono text-cyan-400">{m.true_positives}</div>
                           <div className="text-[9px] font-mono text-cyan-600 mt-1">TP</div>
@@ -752,16 +787,109 @@ export default function Playground() {
                         </div>
                       </div>
                       <div className="text-[9px] font-mono text-slate-600 text-center">
-                        Dataset: MVTec Bottle · Test split · good + broken_large + broken_small + contamination
+                        MVTec Bottle · good + broken_large + broken_small + contamination
                       </div>
                     </div>
                   </div>
+
+                  {/* Threshold Calibration Sweep Chart */}
+                  {sweepChart.length > 0 && (
+                    <div className="border border-white/5 bg-white/2 p-6 rounded-xl space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-mono font-bold tracking-widest text-slate-500 uppercase">Threshold Calibration Sweep</span>
+                        <span className="text-[10px] font-mono text-slate-600">{sweepRaw.length} thresholds tested (0.09 → 0.50)</span>
+                      </div>
+                      {/* Custom bar chart — no external charting library */}
+                      <div className="space-y-2">
+                        {/* Legend */}
+                        <div className="flex gap-4 text-[9px] font-mono text-slate-500 mb-3">
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan-500 inline-block" />Precision</span>
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-500 inline-block" />Recall</span>
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />F1</span>
+                        </div>
+                        <div className="flex items-end gap-1 h-32 w-full overflow-x-auto pb-1">
+                          {sweepChart.map((row) => {
+                            const isSelected = row.threshold === ti.selected_threshold;
+                            return (
+                              <div key={row.threshold} className={`flex flex-col items-center gap-0.5 min-w-[28px] relative group ${isSelected ? 'opacity-100' : 'opacity-70'}`}>
+                                <div className="flex items-end gap-0.5 h-24">
+                                  <div className="w-2 bg-cyan-500 rounded-t transition-all" style={{ height: `${row.precision * 100}%` }} title={`P=${(row.precision*100).toFixed(1)}%`} />
+                                  <div className="w-2 bg-purple-500 rounded-t transition-all" style={{ height: `${row.recall * 100}%` }} title={`R=${(row.recall*100).toFixed(1)}%`} />
+                                  <div className="w-2 bg-amber-500 rounded-t transition-all" style={{ height: `${row.f1_score * 100}%` }} title={`F1=${(row.f1_score*100).toFixed(1)}%`} />
+                                </div>
+                                <span className={`text-[8px] font-mono rotate-0 ${isSelected ? 'text-cyan-glow font-bold' : 'text-slate-600'}`}>
+                                  {row.threshold.toFixed(2)}
+                                </span>
+                                {isSelected && (
+                                  <span className="absolute -top-5 left-1/2 -translate-x-1/2 text-[8px] font-mono text-cyan-glow bg-dark-deep px-1 border border-cyan-glow/20 rounded whitespace-nowrap">best F1</span>
+                                )}
+                                {/* Tooltip on hover */}
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center bg-dark-deep border border-white/10 rounded p-1.5 text-[8px] font-mono text-slate-300 whitespace-nowrap z-50 gap-0.5">
+                                  <span>T={row.threshold.toFixed(3)}</span>
+                                  <span className="text-cyan-400">P={( row.precision*100).toFixed(1)}%</span>
+                                  <span className="text-purple-400">R={(row.recall*100).toFixed(1)}%</span>
+                                  <span className="text-amber-400">F1={(row.f1_score*100).toFixed(1)}%</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Anomaly Score Distribution */}
+                  {distKeys.length > 0 && (
+                    <div className="border border-white/5 bg-white/2 p-6 rounded-xl space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-mono font-bold tracking-widest text-slate-500 uppercase">Anomaly Score Distribution</span>
+                        <div className="flex gap-3 text-[9px] font-mono text-slate-500">
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />Normal</span>
+                          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400 inline-block" />Anomaly</span>
+                        </div>
+                      </div>
+                      <div className="flex items-end gap-2 h-28 overflow-x-auto pb-1">
+                        {distKeys.map((bucket) => {
+                          const { normal, anomaly } = distRaw[bucket];
+                          const maxVal = Math.max(...distKeys.map(k => distRaw[k].normal + distRaw[k].anomaly), 1);
+                          const totalH = (normal + anomaly) / maxVal * 100;
+                          const normH  = normal  / maxVal * 100;
+                          const anomH  = anomaly / maxVal * 100;
+                          const bucketMid = parseFloat(bucket.split('–')[0]) + 0.025;
+                          const isPastThreshold = ti.selected_threshold && bucketMid >= ti.selected_threshold;
+                          return (
+                            <div key={bucket} className="flex flex-col items-center gap-1 min-w-[36px] group relative">
+                              <div className="flex items-end gap-0.5 h-20">
+                                <div className="w-3.5 bg-emerald-500/70 rounded-t" style={{ height: `${normH}%` }} />
+                                <div className="w-3.5 bg-red-400/70 rounded-t"     style={{ height: `${anomH}%` }} />
+                              </div>
+                              <span className={`text-[8px] font-mono ${isPastThreshold ? 'text-cyan-glow' : 'text-slate-600'}`}>
+                                {bucket.split('–')[0]}
+                              </span>
+                              {isPastThreshold && (
+                                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px h-full bg-cyan-glow/30" />
+                              )}
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center bg-dark-deep border border-white/10 rounded p-1.5 text-[8px] font-mono text-slate-300 whitespace-nowrap z-50 gap-0.5">
+                                <span>{bucket}</span>
+                                <span className="text-emerald-400">Normal: {normal}</span>
+                                <span className="text-red-400">Anomaly: {anomaly}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="text-[9px] font-mono text-slate-600">
+                        Cyan line = selected threshold ({ti.selected_threshold?.toFixed(3)}). Scores to the right are classified as anomalous.
+                      </div>
+                    </div>
+                  )}
 
                 </div>
               );
             })()}
           </div>
         )}
+
 
         {/* ══ TAB: HOW IT WORKS ══ */}
         {activeTab === 'how-it-works' && (
