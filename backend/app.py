@@ -47,8 +47,14 @@ def load_clip_model():
     global model, processor
     print(f"Loading CLIP model on device: {device}...")
     try:
-        model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-        processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        model = CLIPModel.from_pretrained(
+            "openai/clip-vit-base-patch32",
+            local_files_only=True
+        ).to(device)
+        processor = CLIPProcessor.from_pretrained(
+            "openai/clip-vit-base-patch32",
+            local_files_only=True
+        )
         print("CLIP model and processor loaded successfully.")
     except Exception as e:
         print(f"Error loading CLIP model: {e}")
@@ -298,4 +304,4 @@ async def serve_frontend(catchall: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)

@@ -93,7 +93,7 @@ while True:
     model,
     processor,
     device=device
-)
+    )
 
     # ANOMALY SCORES
     anomaly_scores = compute_anomaly_scores(
